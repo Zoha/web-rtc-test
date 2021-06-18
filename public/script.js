@@ -2,106 +2,131 @@ const localVideoEl = document.getElementById("local-video-el");
 const remoteVideoEl = document.getElementById("remote-video-el");
 
 const socket = io();
-const pcs = [];
-let userStream = null;
+let parentPc = null;
+const childrenPcs = {};
+let parentStream = null;
 
 // getting the camera
 async function getMedia() {
-  return new Promise((resolve, reject) =>
-    navigator.getUserMedia({ audio: false, video: true }, resolve, reject)
-  );
+  return navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { width: 1280, height: 720 },
+  });
 }
 
-// create rtc
-async function createPC() {
+async function createPC(childId, forceReloadStream = false) {
   const configuration = {
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    iceServers: [{ urls: "stun:stun.1.google.com:19302" }],
   };
 
   const pc = new RTCPeerConnection(configuration);
-  pcs.push(pc);
+  if (childId) {
+    childrenPcs[childId] = pc;
+  } else {
+    parentPc = pc;
+  }
 
   pc.onicecandidate = (e) => {
     if (e.candidate) {
-      socket.emit("candidate", e.candidate);
+      socket.emit("candidate", childId, e.candidate);
     }
   };
 
-  pc.onaddstream = (e) => {
-    playVideoFromStream(remoteVideoEl, e.stream);
+  pc.ontrack = (e) => {
+    if (e.streams[0] && localVideoEl.srcObject !== e.streams[0]) {
+      if (!parentStream || forceReloadStream) {
+        parentStream = e.streams[0];
+        playVideoFromStream(localVideoEl, e.streams[0]);
+      }
+    }
   };
 
-  pc.addStream(userStream);
+  if (!parentStream && !parentPc) {
+    parentStream = await getMedia();
+    playVideoFromStream(localVideoEl, parentStream);
+  }
+
+  if (parentStream) {
+    for (const track of parentStream.getTracks()) {
+      pc.addTrack(track, parentStream);
+    }
+  }
 
   return pc;
 }
 
-// create and send offer
 async function sendOffer(pc) {
-  const offer = await pc.createOffer();
+  const offer = await pc.createOffer({
+    offerToReceiveAudio: 0,
+    offerToReceiveVideo: 1,
+  });
   await pc.setLocalDescription(offer);
   socket.emit("offer", offer);
 }
 
-// handle offer
-function handleOffer(pc, offer) {
+async function handleOffer(pc, offer) {
   pc.setRemoteDescription(new RTCSessionDescription(offer));
 }
 
-// send answer
-async function sendAnswer(pc) {
+async function sendAnswer(childId, pc) {
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
-  socket.emit("answer", answer);
+  socket.emit("answer", childId, answer);
 }
 
-// handle answer event
 async function handleAnswer(pc, answer) {
   const remoteDesc = new RTCSessionDescription(answer);
   await pc.setRemoteDescription(remoteDesc);
 }
 
-// handle new candidate from socket
 async function handleCandidate(pc, candidate) {
   pc.addIceCandidate(candidate);
 }
 
-// gets a video element and play passed stream init
 function playVideoFromStream(videoObject, stream) {
   videoObject.srcObject = stream;
-  videoObject.onloadedmetadata = () => {
-    videoObject.play();
-  };
 }
 
 async function onOfferButtonClick() {
   const pc = await createPC();
-  sendOffer(pc);
+  await sendOffer(pc);
 }
 
 // init handlers for all socket possible events
 function initSocketHandlers() {
-  socket.on("offer", async (offer) => {
-    const pc = await createPC();
-    handleOffer(pc, offer);
-    sendAnswer(pc);
+  socket.on("offer", async (childId, offer) => {
+    const pc = await createPC(childId);
+    await handleOffer(pc, offer);
+    await sendAnswer(childId, pc);
   });
 
   socket.on("answer", (answer) => {
-    const pc = pcs[0];
-    handleAnswer(pc, answer);
+    handleAnswer(parentPc, answer);
   });
 
-  socket.on("candidate", (candidate) => {
-    const pc = pcs[0];
-    handleCandidate(pc, candidate);
+  socket.on("candidate", (id, candidate) => {
+    const pc = childrenPcs[id] || parentPc;
+
+    if (pc) {
+      handleCandidate(pc, candidate);
+    }
+  });
+
+  socket.on("reOffer", async () => {
+    if (parentStream) {
+      parentPc = null;
+      const pc = await createPC(null, true);
+      await sendOffer(pc);
+    }
+  });
+
+  socket.on("childrenDisconnected", (childId) => {
+    delete childrenPcs[childId];
   });
 }
 
 // running the app
 const action = async () => {
-  userStream = await getMedia();
-  playVideoFromStream(localVideoEl, userStream);
   initSocketHandlers();
 };
 
