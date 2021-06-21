@@ -5,27 +5,77 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Document</title>
-    <script src="/socket.io/socket.io.js"></script>
-    <script defer src="./script.js"></script>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.1/dist/css/bootstrap.min.css"
+      integrity="undefined"
+      crossorigin="anonymous"
+    />
   </head>
   <body>
-    <button id="offer maker" onclick="onOfferButtonClick()">make offer</button>
-    <div class="video-container">
-      <div class="video">
-        <h3>local video</h3>
-        <video id="local-video-el" autoplay width="480" height="240"></video>
+    <div class="container py-5">
+      <div class="card" id="btns-card">
+        <div class="card-body">
+          <div class="card-title">
+            <h2>Actions</h2>
+          </div>
+          <button
+            onclick="onHostButtonClicked()"
+            class="btn btn-primary"
+            id="host-btn"
+          >
+            become a host
+          </button>
+          <button
+            onclick="onJoinButtonClicked()"
+            class="btn btn-primary"
+            id="join-btn"
+          >
+            join to a peer
+          </button>
+        </div>
+      </div>
+      <div class="card mt-3">
+        <div class="card-body">
+          <div class="card-title">
+            <span>
+              <h2>
+                Player ->
+                <span id="peer-to-peer-details" style="display: none">
+                  <span class="text-primary" id="self-id">324234</span>
+                  connected to
+                  <span class="text-warning" id="sender-id">1245847</span>
+                </span>
+              </h2>
+            </span>
+          </div>
+          <div class="video-container">
+            <div class="video bg-dark">
+              <video
+                class="mx-auto my-3 d-block"
+                id="local-video-el"
+                autoplay
+                width="720"
+                height="480"
+              ></video>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card mt-3">
+        <div class="card-body">
+          <div class="card-title">
+            <h3>Connections</h3>
+          </div>
+          <div class="card-text">
+            <pre id="connections-list"></pre>
+          </div>
+        </div>
       </div>
     </div>
-  </body>
 
-  <style>
-    .video-container {
-      display: flex;
-      justify-content: space-between;
-    }
-    .video {
-      background: black;
-      margin: 10px;
-    }
-  </style>
+    <script src="https://code.jquery.com/jquery-3.6.0.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script defer src="script.js"></script>
+  </body>
 </html>

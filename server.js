@@ -3,87 +3,158 @@ const app = express();
 const httpServer = require("http").createServer(app);
 
 /** @type {import("socket.io").Server} */
+// @ts-ignore
 const io = require("socket.io")(httpServer);
-const { greenBright: green, grey, blueBright: blue } = require("chalk");
+const { greenBright: green } = require("chalk");
 
-const findAParentPeerForSocket = async (socket) => {
-  let selectedSocket = null;
-
-  io.sockets.sockets.forEach((s) => {
-    if (
-      socket.id !== s.id &&
-      s.childrenPeers.length < 2 &&
-      (!selectedSocket ||
-        s.childrenPeers.length > selectedSocket.childrenPeers.length)
-    ) {
-      selectedSocket = s;
-    }
-  });
-
-  if (selectedSocket) {
-    return selectedSocket.id;
-  }
-
-  return selectedSocket;
+const socketEvents = {
+  // wen answer received
+  SERVER_PEERS_ANSWER: "server:peers.answer",
+  // wen offer received
+  SERVER_PEERS_OFFER: "server:peers.offer",
+  // wen candidate received
+  SERVER_PEERS_CANDIDATE: "server:peers.candidate",
+  // wen this user become a host
+  SERVER_PEERS_HOST: "server:peers.host",
+  // from server - notify children to re offer
+  SERVER_PEERS_RE_OFFER: "server:peers.reOffer",
+  // from server - notify that user should close the publisher
+  SERVER_PEERS_CHILDREN_DISCONNECTED: "server:peers.childrenDisconnected",
+  // server sends tree
+  SERVER_PEERS_TREE: "server:peers.tree",
+  // send answer
+  CLIENT_PEERS_ANSWER: "client:peers.answer",
+  // send offer
+  CLIENT_PEERS_OFFER: "client:peers.offer",
+  // send candidate
+  CLIENT_PEERS_CANDIDATE: "client:peers.candidate",
+  // send host request
+  CLIENT_PEERS_HOST: "client:peers.host",
 };
 
-let socketsCount = 1;
-io.on("connection", async (socket) => {
-  // just for better logging
-  socket.autoIncrementId = socketsCount++;
-  // custom properties for saving children and parent
-  socket.childrenPeers = [];
-  socket.parentPeer = null;
-  socket.isHost = io.sockets.sockets.size === 0;
-  console.info(grey(`socket ${socket.autoIncrementId} connected`));
+const MAXIMUM_PUBLISHER_PER_USER = 2;
 
-  // select a parent and send an offer for it
-  socket.on("offer", async (offer) => {
-    const selectedParent = await findAParentPeerForSocket(socket);
+let peers = [];
+/**
+ *
+ * @param {string} socketId
+ * @param {string} [parentId]
+ * @returns
+ */
+const saveAPeerSocket = (socketId, parentId) => {
+  let parent;
+  if (parentId) {
+    parent = peers.find((i) => i.id === parentId);
+    if (!parent) {
+      return;
+    }
+  }
+  let existedPeer;
+  if ((existedPeer = peers.find((i) => i.id === socketId))) {
+    if (parent) {
+      existedPeer.parent = parent;
+      parent.children.push(existedPeer);
+    }
+    return;
+  }
+  const result = {
+    parent,
+    id: socketId,
+    children: [],
+  };
+  if (parent) {
+    parent.children.push(result);
+  }
+  peers.push(result);
+};
+
+/**
+ * @returns {Promise.<string>}
+ */
+const findAGoodParentPeer = async () => {
+  await new Promise((resolve) => setTimeout(resolve, Math.random() * 100));
+  return peers.find((i) => i.children.length < MAXIMUM_PUBLISHER_PER_USER)?.id;
+};
+
+const getPeersTree = (children) => {
+  children = children || peers.filter((i) => !i.parent);
+  const result = [];
+
+  children.forEach((child) => {
+    const mappedChild = {
+      id: child.id,
+    };
+    mappedChild.parent = child.parent?.id;
+    mappedChild.children = getPeersTree(child.children);
+    result.push(mappedChild);
+  });
+
+  return result;
+};
+
+io.on("connection", (socket) => {
+  // on connection sends tree
+  // for escape from recursive data we parse it as json
+  io.emit(socketEvents.SERVER_PEERS_TREE, getPeersTree());
+
+  // hosting functionality
+  socket.on(socketEvents.CLIENT_PEERS_HOST, () => {
+    saveAPeerSocket(socket.id);
+    socket.emit(socketEvents.SERVER_PEERS_HOST);
+    io.emit(socketEvents.SERVER_PEERS_TREE, getPeersTree());
+  });
+
+  socket.on(socketEvents.CLIENT_PEERS_OFFER, async (offer) => {
+    const selectedParent = await findAGoodParentPeer();
     if (!selectedParent) {
       return;
     }
-    socket.parentPeer = selectedParent;
-    socket.broadcast.to(socket.parentPeer).emit("offer", socket.id, offer);
-  });
-
-  // put new childId to childrenPeers and sent answer for it
-  socket.on("answer", async (childId, answer) => {
-    socket.childrenPeers.push(childId);
-    socket.broadcast.to(childId).emit("answer", answer);
-
-    //  log connection
-    console.info(
-      green(
-        `socket ${blue(
-          io.sockets.sockets.get(childId)?.autoIncrementId
-        )} connected to ${blue(socket.autoIncrementId)}`
-      )
+    io.to(selectedParent).emit(
+      socketEvents.SERVER_PEERS_OFFER,
+      socket.id,
+      offer
     );
   });
 
-  // broadcast candidate for the targetId
-  socket.on("candidate", (targetId, candidate) => {
-    socket.broadcast.emit("candidate", targetId, candidate);
+  socket.on(socketEvents.CLIENT_PEERS_ANSWER, (receiverId, answer) => {
+    saveAPeerSocket(receiverId, socket.id);
+    console.log(green(`${receiverId} connected to ${socket.id}`));
+    io.to(receiverId).emit(socketEvents.SERVER_PEERS_ANSWER, socket.id, answer);
+    io.emit(socketEvents.SERVER_PEERS_TREE, getPeersTree());
   });
 
-  // on disconnect we remove socket from its parent
-  // and also we should notify all the children
-  // children will try to connect to another peer
+  socket.on(socketEvents.CLIENT_PEERS_CANDIDATE, (id, answer) => {
+    socket.broadcast.emit(socketEvents.SERVER_PEERS_CANDIDATE, id, answer);
+  });
+
   socket.on("disconnect", () => {
-    if (socket.isHost) {
+    const peer = peers.find((i) => i.id === socket.id);
+    if (!peer) {
       return;
     }
-    if (socket.parentPeer) {
-      const parentPeerSocket = io.sockets.sockets.get(socket.parentPeer);
-      if (parentPeerSocket) {
-        parentPeerSocket.childrenPeers = parentPeerSocket.childrenPeers.filter(
-          (s) => s !== socket.id
-        );
-      }
+
+    // remove item from peers list
+    peers = peers.filter((i) => i !== peer);
+
+    // remove item from its parent and also notify parent
+    if (peer.parent) {
+      peer.parent.children = peer.parent.children.filter((i) => i !== peer);
+      io.to(peer.parent.id).emit(
+        socketEvents.SERVER_PEERS_CHILDREN_DISCONNECTED,
+        socket.id
+      );
+    } else {
+      peers = [];
     }
-    socket.to(socket.parentPeer).emit("childrenDisconnected", socket.id);
-    socket.to(socket.childrenPeers).emit("reOffer");
+
+    // notify children to re-offer
+    if (peer.children.length) {
+      io.to(peer.children.map((i) => i.id)).emit(
+        socketEvents.SERVER_PEERS_RE_OFFER
+      );
+    }
+
+    io.emit(socketEvents.SERVER_PEERS_TREE, getPeersTree());
   });
 });
 
