@@ -12,6 +12,19 @@ const log = (...args) => {
   }
 };
 
+const webRTCConfiguration = {
+  iceServers: [
+    {
+      url: "stun:stun.ekiga.net",
+      urls: ["stun:stun.ekiga.net"],
+    },
+    {
+      url: "stun:stun4.l.google.com:19302",
+      urls: ["stun:stun4.l.google.com:19302"],
+    },
+  ],
+};
+
 let receiver = null;
 
 const socketEvents = {
@@ -29,6 +42,8 @@ const socketEvents = {
   SERVER_PEERS_CHILDREN_DISCONNECTED: "server:peers.childrenDisconnected",
   // server sends tree
   SERVER_PEERS_TREE: "server:peers.tree",
+  // send id to user
+  SERVER_NUMBER_ID: "server:numberId",
   // send answer
   CLIENT_PEERS_ANSWER: "client:peers.answer",
   // send offer
@@ -50,15 +65,14 @@ class Publisher {
   constructor() {
     /** @type {string} */
     this.receiverId = null;
+    /** @type {string} */
+    this.receiverNumberId = null;
     /** @type {RTCPeerConnection} */
     this.peer = null;
     this.createPeer();
-    this.rtcConfiguration = {
-      iceServers: [{ urls: "stun:stun.1.google.com:19302" }],
-    };
   }
   createPeer() {
-    this.peer = new RTCPeerConnection(this.rtcConfiguration);
+    this.peer = new RTCPeerConnection(webRTCConfiguration);
     this.peer.addEventListener("icecandidate", (event) => {
       this.onLocalCandidateReceive(event);
     });
@@ -84,9 +98,10 @@ class Publisher {
       this.peer.addTrack(newTrack, stream);
     }
   }
-  async onOffer(receiverId, offer) {
+  async onOffer(receiverId, receiverNumberId, offer) {
     log(`offer on publisher, receiverId : ${receiverId}`);
     this.receiverId = receiverId;
+    this.receiverNumberId = receiverNumberId;
     this.peer.setRemoteDescription(new RTCSessionDescription(offer));
     this.answer();
   }
@@ -95,7 +110,12 @@ class Publisher {
     const answer = await this.peer.createAnswer();
     await this.peer.setLocalDescription(answer);
     // we should send id too because the user is unknown to signal controller
-    socket.emit(socketEvents.CLIENT_PEERS_ANSWER, this.receiverId, answer);
+    socket.emit(
+      socketEvents.CLIENT_PEERS_ANSWER,
+      this.receiverId,
+      this.receiverNumberId,
+      answer
+    );
   }
   replaceTracks() {
     log("replace tracks");
@@ -112,6 +132,7 @@ class Publisher {
     }
   }
   onRemoteCandidateReceive(id, candidate) {
+    console.log("REMOTE ICE");
     log(`remote candidate received from id: ${id}, candidate:`, candidate);
     if (this.receiverId === id && this.peer) {
       this.peer.addIceCandidate(candidate);
@@ -125,7 +146,9 @@ class Publisher {
 class ReceiverBase {
   constructor() {
     /** @type {string} */
-    this._senderId = null;
+    this.senderId = null;
+    /** @type {string} */
+    this._senderNumberId = null;
     /** @type {HTMLVideoElement} */
     // @ts-ignore
     this.player = document.getElementById("local-video-el");
@@ -135,14 +158,20 @@ class ReceiverBase {
     this.peer = null;
   }
 
-  get senderId() {
-    return this._senderId;
+  get senderNumberId() {
+    return this._senderNumberId;
   }
 
-  set senderId(value) {
-    $("#peer-to-peer-details").toggle(!!value);
-    $("#sender-id").text(value);
-    this._senderId = value;
+  set senderNumberId(value) {
+    $("#peer-to-peer-details").toggle(!!value || socket.numberId);
+    $("#peer-to-peer-details").html(
+      value
+        ? `
+      Audience : <span class="text-primary">${socket.numberId}</span> connected to <span class="text-warning">${value}</span>
+    `
+        : `Publisher : <span class="text-success">${socket.numberId}</span>`
+    );
+    this._senderNumberId = value;
   }
 
   playVideoFromStream(stream) {
@@ -157,6 +186,14 @@ class ReceiverBase {
       player.play();
     };
   }
+
+  stopPlayer() {
+    const player = this.player;
+    player.srcObject = null;
+    player.pause();
+    player.load();
+  }
+
   onDisconnect() {
     log(`on disconnected in receiver base`);
   }
@@ -197,6 +234,7 @@ class LocalReceiver extends ReceiverBase {
   constructor() {
     super();
     this.playVideoFromLocalMedia();
+    this.senderNumberId = null;
   }
   async playVideoFromLocalMedia() {
     const stream = await getMedia();
@@ -208,12 +246,9 @@ class Receiver extends ReceiverBase {
   constructor() {
     super();
     this.createPeer();
-    this.rtcConfiguration = {
-      iceServers: [{ urls: "stun:stun.1.google.com:19302" }],
-    };
   }
   createPeer() {
-    this.peer = new RTCPeerConnection(this.rtcConfiguration);
+    this.peer = new RTCPeerConnection(webRTCConfiguration);
     this.peer.addEventListener("icecandidate", (event) => {
       this.onLocalCandidateReceive(event);
     });
@@ -231,6 +266,8 @@ class Receiver extends ReceiverBase {
     socket.emit(socketEvents.CLIENT_PEERS_OFFER, offer);
   }
   async reOffer() {
+    this.senderNumberId = "connecting...";
+    this.stopPlayer();
     this.offer();
     this.replacePublishersTracks();
   }
@@ -262,9 +299,10 @@ class Receiver extends ReceiverBase {
     }
   }
 
-  async onAnswer(senderId, answer) {
+  async onAnswer(senderId, senderNumberId, answer) {
     log(`on answer senderId ${senderId}`);
     this.senderId = senderId;
+    this.senderNumberId = senderNumberId;
     const remoteDesc = new RTCSessionDescription(answer);
     await this.peer.setRemoteDescription(remoteDesc);
   }
@@ -289,25 +327,27 @@ function onJoinButtonClicked() {
 }
 
 (async () => {
-  socket.on("connect", () => {
-    $("#self-id").text(socket.id);
+  socket.on(socketEvents.SERVER_NUMBER_ID, (numberId) => {
+    socket.numberId = numberId;
   });
 
   // when we become a host -> create a local receiver stream
   socket.on(socketEvents.SERVER_PEERS_HOST, () => {
     log(`SERVER_PEERS_HOST socket event`);
-
     receiver = new LocalReceiver();
   });
 
-  socket.on(socketEvents.SERVER_PEERS_OFFER, (receiverId, offer) => {
-    log(`SERVER_PEERS_OFFER socket event`, receiverId, offer);
-    if (receiver) {
-      const publisher = new Publisher();
-      receiver.addPublisher(publisher);
-      publisher.onOffer(receiverId, offer);
+  socket.on(
+    socketEvents.SERVER_PEERS_OFFER,
+    (receiverId, receiverNumberId, offer) => {
+      log(`SERVER_PEERS_OFFER socket event`, receiverId, offer);
+      if (receiver) {
+        const publisher = new Publisher();
+        receiver.addPublisher(publisher);
+        publisher.onOffer(receiverId, receiverNumberId, offer);
+      }
     }
-  });
+  );
 
   socket.on(socketEvents.SERVER_PEERS_CANDIDATE, (id, candidate) => {
     log(`SERVER_PEERS_CANDIDATE socket event`, id, candidate);
@@ -317,12 +357,15 @@ function onJoinButtonClicked() {
     }
   });
 
-  socket.on(socketEvents.SERVER_PEERS_ANSWER, (senderId, answer) => {
-    log(`SERVER_PEERS_ANSWER socket event`, senderId, answer);
-    if (receiver) {
-      receiver.onAnswer(senderId, answer);
+  socket.on(
+    socketEvents.SERVER_PEERS_ANSWER,
+    (senderId, senderNumberId, answer) => {
+      log(`SERVER_PEERS_ANSWER socket event`, senderId, answer);
+      if (receiver) {
+        receiver.onAnswer(senderId, senderNumberId, answer);
+      }
     }
-  });
+  );
 
   socket.on(socketEvents.SERVER_PEERS_RE_OFFER, () => {
     log(`SERVER_PEERS_RE_OFFER socket event`);
@@ -342,6 +385,9 @@ function onJoinButtonClicked() {
   });
 
   socket.on(socketEvents.SERVER_PEERS_TREE, (peersTree) => {
+    if (peersTree && !peersTree.length) {
+      receiver = null;
+    }
     const hostBtn = $("#host-btn");
     const joinBtn = $("#join-btn");
     const btnsCard = $("#btns-card").stop();
@@ -349,7 +395,7 @@ function onJoinButtonClicked() {
 
     !peersTree.length ? hostBtn.show() : hostBtn.hide();
     peersTree.length ? joinBtn.show() : joinBtn.hide();
-    !receiver ? btnsCard.slideDown() : btnsCard.slideUp();
+    !receiver || !peersTree.length ? btnsCard.slideDown() : btnsCard.slideUp();
     peersTree.length || receiver
       ? connectionsList.slideDown()
       : connectionsList.slideUp();

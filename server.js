@@ -22,6 +22,8 @@ const socketEvents = {
   SERVER_PEERS_CHILDREN_DISCONNECTED: "server:peers.childrenDisconnected",
   // server sends tree
   SERVER_PEERS_TREE: "server:peers.tree",
+  // send id to user
+  SERVER_NUMBER_ID: "server:numberId",
   // send answer
   CLIENT_PEERS_ANSWER: "client:peers.answer",
   // send offer
@@ -38,10 +40,11 @@ let peers = [];
 /**
  *
  * @param {string} socketId
+ * @param {string} socketNumberId
  * @param {string} [parentId]
  * @returns
  */
-const saveAPeerSocket = (socketId, parentId) => {
+const saveAPeerSocket = (socketId, socketNumberId, parentId) => {
   let parent;
   if (parentId) {
     parent = peers.find((i) => i.id === parentId);
@@ -60,6 +63,7 @@ const saveAPeerSocket = (socketId, parentId) => {
   const result = {
     parent,
     id: socketId,
+    numberId: socketNumberId,
     children: [],
   };
   if (parent) {
@@ -83,6 +87,7 @@ const getPeersTree = (children) => {
   children.forEach((child) => {
     const mappedChild = {
       id: child.id,
+      numberId: child.numberId,
     };
     mappedChild.parent = child.parent?.id;
     mappedChild.children = getPeersTree(child.children);
@@ -92,15 +97,28 @@ const getPeersTree = (children) => {
   return result;
 };
 
+let numberId = 0;
 io.on("connection", (socket) => {
   // on connection sends tree
   // for escape from recursive data we parse it as json
   io.emit(socketEvents.SERVER_PEERS_TREE, getPeersTree());
 
+  // send number id
+  // @ts-ignore
+  socket.numberId = ++numberId;
+
+  // @ts-ignore
+  socket.emit(socketEvents.SERVER_NUMBER_ID, numberId);
+
   // hosting functionality
   socket.on(socketEvents.CLIENT_PEERS_HOST, () => {
-    saveAPeerSocket(socket.id);
+    peers = [];
+
+    // @ts-ignore
+    saveAPeerSocket(socket.id, socket.numberId);
+
     socket.emit(socketEvents.SERVER_PEERS_HOST);
+
     io.emit(socketEvents.SERVER_PEERS_TREE, getPeersTree());
   });
 
@@ -112,16 +130,27 @@ io.on("connection", (socket) => {
     io.to(selectedParent).emit(
       socketEvents.SERVER_PEERS_OFFER,
       socket.id,
+      // @ts-ignore
+      socket.numberId,
       offer
     );
   });
 
-  socket.on(socketEvents.CLIENT_PEERS_ANSWER, (receiverId, answer) => {
-    saveAPeerSocket(receiverId, socket.id);
-    console.log(green(`${receiverId} connected to ${socket.id}`));
-    io.to(receiverId).emit(socketEvents.SERVER_PEERS_ANSWER, socket.id, answer);
-    io.emit(socketEvents.SERVER_PEERS_TREE, getPeersTree());
-  });
+  socket.on(
+    socketEvents.CLIENT_PEERS_ANSWER,
+    (receiverId, receiverNumberId, answer) => {
+      saveAPeerSocket(receiverId, receiverNumberId, socket.id);
+      console.log(green(`${receiverId} connected to ${socket.id}`));
+      io.to(receiverId).emit(
+        socketEvents.SERVER_PEERS_ANSWER,
+        socket.id,
+        // @ts-ignore
+        socket.numberId,
+        answer
+      );
+      io.emit(socketEvents.SERVER_PEERS_TREE, getPeersTree());
+    }
+  );
 
   socket.on(socketEvents.CLIENT_PEERS_CANDIDATE, (id, answer) => {
     socket.broadcast.emit(socketEvents.SERVER_PEERS_CANDIDATE, id, answer);
