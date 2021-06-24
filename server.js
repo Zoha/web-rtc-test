@@ -76,7 +76,10 @@ const saveAPeerSocket = (socketId, socketNumberId, parentId) => {
  * @returns {Promise.<string>}
  */
 const findAGoodParentPeer = async () => {
-  await new Promise((resolve) => setTimeout(resolve, Math.random() * 100));
+  console.log("finding");
+  await new Promise((resolve) => setTimeout(resolve, Math.random() * 200));
+  console.log("still finding", peers);
+
   return peers.find((i) => i.children.length < MAXIMUM_PUBLISHER_PER_USER)?.id;
 };
 
@@ -123,7 +126,12 @@ io.on("connection", (socket) => {
   });
 
   socket.on(socketEvents.CLIENT_PEERS_OFFER, async (offer) => {
-    const selectedParent = await findAGoodParentPeer();
+    let selectedParent,
+      tries = 0;
+    while (!selectedParent || tries > 3) {
+      selectedParent = await findAGoodParentPeer();
+      tries++;
+    }
     if (!selectedParent) {
       return;
     }
